@@ -296,12 +296,12 @@ def evaluate_squeeze_risk(metrics: QuoteMetrics) -> EvaluationResult:
         score += 15
         triggered_rules.append("Structural Lockup: Inst Own > 80% (+15)")
 
-    if metrics.short_ratio > 4:
+    if metrics.short_ratio > 8:
         score += 15
-        triggered_rules.append("Exit Trap: Short Ratio > 4 days (+15)")
-    elif metrics.short_ratio > 2:
+        triggered_rules.append("Exit Trap: Short Ratio > 8 days (+15)")
+    elif metrics.short_ratio > 4:
         score += 10
-        triggered_rules.append("Exit Trap: Short Ratio > 2 days (+10)")
+        triggered_rules.append("Exit Trap: Short Ratio > 4 days (+10)")
 
     if 0 < metrics.float_shares < 20_000_000:
         score += 15

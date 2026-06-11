@@ -59,7 +59,7 @@ python short_squeeze_monitor.py CAR --local-html finviz_quote.html
 
 - **Fuel Weight / Short Float**: `> 40%` = 35 pts; `> 20%` = 20 pts
 - **Structural Lockup / Inst Own**: `> 100%` = 25 pts; `> 80%` = 15 pts
-- **Exit Trap / Short Ratio**: `> 4 days` = 15 pts; `> 2 days` = 10 pts
+- **Exit Trap / Short Ratio**: `> 8 days` = 15 pts; `> 4 days` = 10 pts
 - **Float Scale**: `< 20M` = 15 pts; `< 50M` = 10 pts
 - **Live Trigger**: `RVOL > 2.5x` with positive price change = 10 pts
 
