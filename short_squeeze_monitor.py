@@ -282,12 +282,12 @@ def evaluate_squeeze_risk(metrics: QuoteMetrics) -> EvaluationResult:
     score = 0
     triggered_rules: list[str] = []
 
-    if metrics.short_float > 30:
+    if metrics.short_float > 40:
         score += 35
-        triggered_rules.append("Fuel Weight: Short Float > 30% (+35)")
-    elif metrics.short_float > 15:
+        triggered_rules.append("Fuel Weight: Short Float > 40% (+35)")
+    elif metrics.short_float > 20:
         score += 20
-        triggered_rules.append("Fuel Weight: Short Float > 15% (+20)")
+        triggered_rules.append("Fuel Weight: Short Float > 20% (+20)")
 
     if metrics.institutional_ownership > 100:
         score += 25
