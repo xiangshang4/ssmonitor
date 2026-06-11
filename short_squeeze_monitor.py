@@ -310,9 +310,12 @@ def evaluate_squeeze_risk(metrics: QuoteMetrics) -> EvaluationResult:
         score += 10
         triggered_rules.append("Float Scale: Float < 50M (+10)")
 
-    if metrics.rvol > 2.5 and metrics.change_percent > 0:
-        score += 10
-        triggered_rules.append("Live Trigger: RVOL > 2.5x with positive change (+10)")
+    if metrics.rvol > 8 and metrics.change_percent > 0:
+        score += 25
+        triggered_rules.append("Live Trigger: RVOL > 8.0x with positive change (+25)")
+    elif metrics.rvol > 5 and metrics.change_percent > 0:
+        score += 15
+        triggered_rules.append("Live Trigger: RVOL > 5.0x with positive change (+15)")
 
     if score >= 75:
         grade = "CRITICAL SQUEEZE RISK"

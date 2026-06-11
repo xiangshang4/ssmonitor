@@ -61,7 +61,7 @@ python short_squeeze_monitor.py CAR --local-html finviz_quote.html
 - **Structural Lockup / Inst Own**: `> 100%` = 25 pts; `> 80%` = 15 pts
 - **Exit Trap / Short Ratio**: `> 8 days` = 15 pts; `> 4 days` = 10 pts
 - **Float Scale**: `< 20M` = 15 pts; `< 50M` = 10 pts
-- **Live Trigger**: `RVOL > 2.5x` with positive price change = 10 pts
+- **Live Trigger**: `RVOL > 8.0x` with positive price change = 25 pts; `RVOL > 5.0x` with positive price change = 15 pts
 
 Grades:
 
