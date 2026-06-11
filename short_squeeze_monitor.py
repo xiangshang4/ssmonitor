@@ -343,6 +343,10 @@ def score_row(
     borrow_fee_column: str | None,
     squeeze_score_column: str | None,
 ) -> tuple[int, list[str]]:
+    volume_fetch_status = str(row.get("Volume Fetch Status", "ok")).strip().lower()
+    if volume_fetch_status and volume_fetch_status != "ok":
+        return 0, [f"Skipped: volume fetch {volume_fetch_status}"]
+
     score = 0
     reasons: list[str] = []
 
