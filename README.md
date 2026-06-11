@@ -1,24 +1,18 @@
 # US Stock Short Squeeze Monitor AI Agent
 
-Production-oriented Python pipeline for monitoring potential US stock short squeeze
-targets from a Finviz screener export.
+Production-oriented Python agent for evaluating exactly one US stock ticker from
+its dedicated Finviz quote page.
 
 ## What it does
 
-The agent runs three sequential phases:
+The agent runs two sequential steps:
 
-1. **Scrape** - Attempts to fetch a Finviz Ownership screener URL with
-   browser-like headers. The default URL filters for `Short Float > 20%`. If
-   Finviz blocks the request or returns unusable HTML, it falls back to parsing a
-   local `finviz.html` file saved manually from your browser.
-2. **Get Volume** - Extracts each ticker from the Finviz screener table, queries
-   `yfinance`, and appends:
-   - Yesterday / previous completed trading-day volume
-   - 3-month average volume
-   - Relative volume (`RVOL`)
-3. **Evaluate** - Scores each ticker with weighted short-float, days-to-cover,
-   and RVOL rules, then prints high-alert targets with `Agent Score >= 50` as a
-   Markdown table.
+1. **Scrape** - Fetches the ticker's Finviz quote page using browser-like HTTP
+   headers. If Finviz blocks the request or returns unusable HTML, it falls back
+   to a local `finviz_quote.html` file saved manually from your browser.
+2. **Evaluate** - Parses the `snapshot-table2` fundamentals table, normalizes
+   short-interest and liquidity metrics, calculates live RVOL, and applies a
+   100-point squeeze-risk matrix.
 
 ## Install
 
@@ -28,41 +22,49 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-## Finviz fallback setup
+Direct dependency install:
 
-Finviz may block automated scraping. If the direct scrape fails:
-
-1. Open the Finviz screener page in your browser. Use the Ownership view
-   (`v=131`) and a short-float filter such as:
-   `https://finviz.com/screener.ashx?v=131&f=sh_short_o20&ft=4`
-2. Save the raw HTML source as `finviz.html` in this repository directory.
-3. Re-run the script.
+```bash
+pip install pandas beautifulsoup4 lxml requests
+```
 
 ## Run
+
+Evaluate a ticker:
+
+```bash
+python short_squeeze_monitor.py CAR
+```
+
+If no ticker is supplied, the script defaults to `CAR`:
 
 ```bash
 python short_squeeze_monitor.py
 ```
 
-Optional arguments:
+## Local fallback setup
+
+Finviz may block automated requests. If direct scraping fails:
+
+1. Open the Finviz quote page manually in your browser, for example:
+   `https://finviz.com/quote.ashx?t=CAR&p=d`
+2. Save the raw HTML source as `finviz_quote.html` in this repository directory.
+3. Re-run:
 
 ```bash
-python short_squeeze_monitor.py \
-  --url "https://finviz.com/screener.ashx?v=131&f=sh_short_o20&ft=4" \
-  --local-html finviz.html \
-  --max-pages 1 \
-  --output-csv high_alerts.csv
+python short_squeeze_monitor.py CAR --local-html finviz_quote.html
 ```
 
-For a quick smoke test against only a few rows:
+## Scoring matrix
 
-```bash
-python short_squeeze_monitor.py --limit 5 --min-sleep 0.5 --max-sleep 1.5
-```
+- **Fuel Weight / Short Float**: `> 30%` = 35 pts; `> 15%` = 20 pts
+- **Structural Lockup / Inst Own**: `> 100%` = 25 pts; `> 80%` = 15 pts
+- **Exit Trap / Short Ratio**: `> 4 days` = 15 pts; `> 2 days` = 10 pts
+- **Float Scale**: `< 20M` = 15 pts; `< 50M` = 10 pts
+- **Live Trigger**: `RVOL > 2.5x` with positive price change = 10 pts
 
-## Notes
+Grades:
 
-- One ticker failure will be logged and skipped without stopping the pipeline.
-- Random sleeps between yfinance calls reduce rate-limit and throttling risk.
-- The script prints phase banners and per-ticker progress for operational
-  visibility.
+- `>= 75`: `CRITICAL SQUEEZE RISK`
+- `>= 50`: `HIGH SQUEEZE RISK`
+- Otherwise: `LOW/STABLE`
