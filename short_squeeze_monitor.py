@@ -3,10 +3,10 @@
 US Stock Short Squeeze Monitor AI Agent.
 
 Pipeline:
-1. Scrape/parse Fintel leaderboard data, falling back to a local fintel.html file.
+1. Acquire high-short-float candidates from Finviz, falling back to finviz.html.
 2. Enrich each ticker with yfinance previous completed trading-day volume,
    3-month average volume, and relative volume.
-3. Evaluate a multi-factor short squeeze risk score and print high-alert targets.
+3. Evaluate a weighted short-squeeze risk score and print high-alert targets.
 """
 
 from __future__ import annotations
@@ -21,6 +21,7 @@ from datetime import datetime, time as dt_time
 from io import StringIO
 from pathlib import Path
 from typing import Iterable
+from urllib.parse import urlencode, urlparse, urlunparse, parse_qsl
 from zoneinfo import ZoneInfo
 
 import pandas as pd
@@ -29,8 +30,8 @@ import yfinance as yf
 from bs4 import BeautifulSoup
 
 
-DEFAULT_FINTEL_URL = "https://fintel.io"
-DEFAULT_LOCAL_HTML = "fintel.html"
+DEFAULT_FINVIZ_URL = "https://finviz.com/screener.ashx?v=131&f=sh_short_o20&ft=4"
+DEFAULT_LOCAL_HTML = "finviz.html"
 REQUEST_TIMEOUT_SECONDS = 30
 MARKET_TIMEZONE = ZoneInfo("America/New_York")
 MARKET_CLOSE_BUFFER = dt_time(hour=16, minute=10)
@@ -38,12 +39,13 @@ MARKET_CLOSE_BUFFER = dt_time(hour=16, minute=10)
 
 @dataclass(frozen=True)
 class MonitorConfig:
-    fintel_url: str
+    finviz_url: str
     local_html_path: Path
     min_sleep_seconds: float
     max_sleep_seconds: float
     limit: int | None
     output_csv_path: Path | None
+    max_pages: int
 
 
 def log_phase(title: str) -> None:
@@ -72,40 +74,16 @@ def browser_headers() -> dict[str, str]:
         "Connection": "keep-alive",
         "DNT": "1",
         "Pragma": "no-cache",
+        "Referer": "https://finviz.com/screener.ashx",
         "Sec-Fetch-Dest": "document",
         "Sec-Fetch-Mode": "navigate",
-        "Sec-Fetch-Site": "none",
+        "Sec-Fetch-Site": "same-origin",
         "Sec-Fetch-User": "?1",
         "Upgrade-Insecure-Requests": "1",
         "sec-ch-ua": '"Google Chrome";v="125", "Chromium";v="125", "Not.A/Brand";v="24"',
         "sec-ch-ua-mobile": "?0",
         "sec-ch-ua-platform": '"Windows"',
     }
-
-
-def fetch_fintel_html(url: str, local_html_path: Path) -> str:
-    """Fetch Fintel HTML directly, then fall back to a browser-saved local file."""
-    log(f"Attempting direct HTTP request to {url}")
-    session = requests.Session()
-    session.headers.update(browser_headers())
-
-    try:
-        response = session.get(url, timeout=REQUEST_TIMEOUT_SECONDS)
-        log(f"Direct request completed with HTTP status {response.status_code}")
-        if response.status_code == 200 and response.text.strip():
-            return response.text
-
-        log(
-            "Direct request did not return usable HTTP 200 HTML. "
-            "Cloudflare or anti-bot protection may be active."
-        )
-    except requests.RequestException as exc:
-        log(f"Direct request failed: {exc}")
-
-    log(f"Falling back to local HTML file: {local_html_path}")
-    html = read_local_html(local_html_path)
-    log(f"Loaded {len(html):,} characters from local fallback HTML.")
-    return html
 
 
 def read_local_html(local_html_path: Path) -> str:
@@ -118,12 +96,74 @@ def read_local_html(local_html_path: Path) -> str:
     return html
 
 
+def with_finviz_page(url: str, page_number: int) -> str:
+    """Finviz pages are 20 rows wide and use r=1, r=21, r=41, ... offsets."""
+    if page_number <= 1:
+        return url
+
+    parsed = urlparse(url)
+    query = dict(parse_qsl(parsed.query, keep_blank_values=True))
+    query["r"] = str(1 + ((page_number - 1) * 20))
+    return urlunparse(parsed._replace(query=urlencode(query)))
+
+
+def fetch_single_finviz_page(session: requests.Session, url: str) -> str | None:
+    log(f"Attempting direct HTTP request to {url}")
+    try:
+        response = session.get(url, timeout=REQUEST_TIMEOUT_SECONDS)
+        log(f"Direct request completed with HTTP status {response.status_code}")
+        if response.status_code == 200 and response.text.strip():
+            return response.text
+    except requests.RequestException as exc:
+        log(f"Direct request failed: {exc}")
+
+    log("Direct Finviz request did not return usable HTTP 200 HTML.")
+    return None
+
+
+def fetch_finviz_html_pages(url: str, local_html_path: Path, max_pages: int) -> list[str]:
+    """Fetch Finviz screener HTML pages, falling back to one browser-saved file."""
+    session = requests.Session()
+    session.headers.update(browser_headers())
+    session.cookies.set("screenerUrl", url, domain="finviz.com")
+
+    pages: list[str] = []
+    for page_number in range(1, max_pages + 1):
+        page_url = with_finviz_page(url, page_number)
+        html = fetch_single_finviz_page(session, page_url)
+        if html is None:
+            break
+        pages.append(html)
+
+        # If this page has no recognizable screener table, continuing will only
+        # multiply blocked/protected pages. Parse validation happens later.
+        if not has_html_table(html):
+            log("Fetched HTML has no table elements; stopping direct pagination.")
+            break
+
+        if page_number < max_pages:
+            sleep_seconds = random.uniform(0.5, 1.5)
+            log(f"Sleeping {sleep_seconds:.2f}s before next Finviz page.")
+            time.sleep(sleep_seconds)
+
+    if pages:
+        return pages
+
+    log(f"Falling back to local Finviz HTML file: {local_html_path}")
+    html = read_local_html(local_html_path)
+    log(f"Loaded {len(html):,} characters from local fallback HTML.")
+    return [html]
+
+
+def has_html_table(html: str) -> bool:
+    return bool(BeautifulSoup(html, "html.parser").find("table"))
+
+
 def clean_column_name(column: object) -> str:
     if isinstance(column, tuple):
         column = " ".join(str(part) for part in column if str(part) != "nan")
 
-    cleaned = re.sub(r"\s+", " ", str(column)).strip()
-    cleaned = cleaned.replace("\xa0", " ")
+    cleaned = str(column).replace("\xa0", " ")
     cleaned = re.sub(r"\s+", " ", cleaned).strip()
     return cleaned
 
@@ -132,7 +172,8 @@ def clean_cell_value(value: object) -> object:
     if pd.isna(value):
         return ""
     if isinstance(value, str):
-        return re.sub(r"\s+", " ", value.replace("\xa0", " ")).strip()
+        cleaned = value.replace("\xa0", " ")
+        return re.sub(r"\s+", " ", cleaned).strip()
     return value
 
 
@@ -145,92 +186,157 @@ def normalize_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     return normalized.reset_index(drop=True)
 
 
-def table_score(columns: Iterable[str]) -> int:
-    joined = " | ".join(column.lower() for column in columns)
-    score = 0
-    for keyword in ("security", "ticker", "symbol"):
-        if keyword in joined:
-            score += 4
-    for keyword in ("short", "squeeze", "borrow", "fee", "float"):
-        if keyword in joined:
-            score += 2
-    return score
-
-
-def parse_leaderboard_table(html: str) -> pd.DataFrame:
-    """Extract the most likely Fintel leaderboard table from HTML."""
-    log("Parsing HTML with BeautifulSoup and pandas.read_html.")
-    soup = BeautifulSoup(html, "html.parser")
-    for element in soup(["script", "style", "noscript"]):
-        element.decompose()
-
-    table_html_fragments = [str(table) for table in soup.find_all("table")]
-    if not table_html_fragments:
-        raise ValueError("No HTML <table> elements were found in the supplied Fintel HTML.")
-
-    candidates: list[tuple[int, int, pd.DataFrame]] = []
-    for index, table_html in enumerate(table_html_fragments):
-        try:
-            parsed_tables = pd.read_html(StringIO(table_html))
-        except ValueError:
-            continue
-
-        for parsed_df in parsed_tables:
-            normalized = normalize_dataframe(parsed_df)
-            if normalized.empty:
-                continue
-            score = table_score(normalized.columns)
-            candidates.append((score, index, normalized))
-
-    if not candidates:
-        raise ValueError("pandas.read_html could not parse a non-empty leaderboard table.")
-
-    candidates.sort(key=lambda item: (item[0], len(item[2])), reverse=True)
-    best_score, best_index, best_df = candidates[0]
-    log(
-        f"Selected table #{best_index + 1} with heuristic score {best_score} "
-        f"and shape {best_df.shape[0]} rows x {best_df.shape[1]} columns."
-    )
-
-    security_column = find_column(best_df, ["security", "ticker", "symbol"], required=False)
-    if security_column is None:
-        raise ValueError(
-            "Could not identify a Security/Ticker/Symbol column in the selected table. "
-            f"Columns found: {list(best_df.columns)}"
-        )
-
-    return best_df
+def normalize_column_key(column: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "", column.lower())
 
 
 def find_column(
     df: pd.DataFrame,
-    possible_terms: list[str],
+    possible_terms: Iterable[str],
     *,
     required: bool = True,
 ) -> str | None:
-    normalized_terms = [term.lower() for term in possible_terms]
+    normalized_terms = [normalize_column_key(term) for term in possible_terms]
     for column in df.columns:
-        lower_column = column.lower()
-        if any(term in lower_column for term in normalized_terms):
+        normalized_column = normalize_column_key(column)
+        if any(term and term in normalized_column for term in normalized_terms):
             return column
 
     if required:
         raise KeyError(
-            f"Could not find a column matching terms {possible_terms}. "
+            f"Could not find a column matching terms {list(possible_terms)}. "
             f"Available columns: {list(df.columns)}"
         )
     return None
 
 
-def extract_ticker(security_value: object) -> str:
-    text = str(security_value).strip()
-    if "/" in text:
-        text = text.split("/", maxsplit=1)[0].strip()
-    else:
-        text = text.split(maxsplit=1)[0].strip()
+def table_score(columns: Iterable[str]) -> int:
+    joined = " | ".join(column.lower() for column in columns)
+    score = 0
+    for keyword in ("ticker", "symbol"):
+        if keyword in joined:
+            score += 5
+    for keyword in ("short float", "shortfloat"):
+        if keyword in joined:
+            score += 5
+    for keyword in ("short ratio", "days to cover", "daystocover"):
+        if keyword in joined:
+            score += 5
+    return score
 
-    ticker = re.sub(r"[^A-Za-z0-9.\-]", "", text).upper()
+
+def extract_tables_from_html(html: str) -> list[pd.DataFrame]:
+    soup = BeautifulSoup(html, "html.parser")
+    for element in soup(["script", "style", "noscript"]):
+        element.decompose()
+
+    tables: list[pd.DataFrame] = []
+    for table in soup.find_all("table"):
+        try:
+            parsed_tables = pd.read_html(StringIO(str(table)))
+        except ValueError:
+            continue
+
+        for parsed_df in parsed_tables:
+            normalized = normalize_dataframe(parsed_df)
+            if not normalized.empty:
+                tables.append(normalized)
+    return tables
+
+
+def parse_finviz_candidates(html_pages: list[str], local_html_path: Path | None = None) -> pd.DataFrame:
+    """Extract Ticker, Short Float, and Days to Cover from Finviz screener HTML."""
+    log("Parsing Finviz HTML with BeautifulSoup and pandas.read_html.")
+    candidates: list[tuple[int, int, pd.DataFrame]] = []
+
+    for page_index, html in enumerate(html_pages, start=1):
+        for table in extract_tables_from_html(html):
+            score = table_score(table.columns)
+            candidates.append((score, page_index, table))
+
+    if not candidates and local_html_path is not None:
+        log("Direct Finviz parse found no tables; retrying local fallback HTML.")
+        candidates = [
+            (table_score(table.columns), 1, table)
+            for table in extract_tables_from_html(read_local_html(local_html_path))
+        ]
+
+    if not candidates:
+        raise ValueError("No parseable HTML tables were found in the supplied Finviz HTML.")
+
+    candidates.sort(key=lambda item: (item[0], len(item[2])), reverse=True)
+    best_score = candidates[0][0]
+    selected_tables = [table for score, _, table in candidates if score == best_score and score > 0]
+    if not selected_tables:
+        raise ValueError(
+            "Could not identify a Finviz screener table containing Ticker, "
+            "Short Float, and Short Ratio/Days to Cover columns."
+        )
+
+    raw_df = pd.concat(selected_tables, ignore_index=True)
+    log(
+        f"Selected {len(selected_tables)} Finviz table(s) with heuristic score "
+        f"{best_score}; combined shape {raw_df.shape[0]} rows x {raw_df.shape[1]} columns."
+    )
+    return normalize_finviz_candidate_columns(raw_df)
+
+
+def clean_ticker(value: object) -> str:
+    text = str(value).strip().upper()
+    text = text.split(maxsplit=1)[0]
+    ticker = re.sub(r"[^A-Z0-9.\-]", "", text)
     return ticker
+
+
+def safe_float(value: object) -> float:
+    if pd.isna(value):
+        return 0.0
+
+    text = str(value).replace(",", "").replace("%", "")
+    text = text.replace("x", "").replace("X", "")
+    if text.strip() in {"", "-", "N/A", "NA", "nan"}:
+        return 0.0
+
+    multiplier = 1.0
+    suffix_match = re.search(r"([+-]?\d+(?:\.\d+)?)([KMB])\b", text, flags=re.IGNORECASE)
+    if suffix_match:
+        suffix = suffix_match.group(2).upper()
+        multiplier = {"K": 1_000.0, "M": 1_000_000.0, "B": 1_000_000_000.0}[suffix]
+        return float(suffix_match.group(1)) * multiplier
+
+    match = re.search(r"[+-]?\d+(?:\.\d+)?", text)
+    if not match:
+        return 0.0
+    return float(match.group(0)) * multiplier
+
+
+def normalize_finviz_candidate_columns(df: pd.DataFrame) -> pd.DataFrame:
+    ticker_column = find_column(df, ["ticker", "symbol"])
+    short_float_column = find_column(df, ["short float", "shortfloat"])
+    days_to_cover_column = find_column(
+        df,
+        ["days to cover", "daystocover", "short ratio", "shortratio"],
+    )
+
+    normalized = pd.DataFrame(
+        {
+            "Ticker": df[ticker_column].map(clean_ticker),
+            "Short Float": df[short_float_column].map(safe_float),
+            "Days to Cover": df[days_to_cover_column].map(safe_float),
+        }
+    )
+
+    ticker_pattern = re.compile(r"^[A-Z][A-Z0-9.\-]{0,9}$")
+    normalized = normalized[normalized["Ticker"].map(lambda ticker: bool(ticker_pattern.match(ticker)))]
+    normalized = normalized[normalized["Ticker"] != "TICKER"]
+    normalized = normalized.drop_duplicates(subset=["Ticker"], keep="first")
+    normalized = normalized.reset_index(drop=True)
+
+    if normalized.empty:
+        raise ValueError("Finviz table parsing produced no valid ticker rows.")
+
+    log(f"Normalized Finviz candidates: {len(normalized)} ticker rows.")
+    return normalized
 
 
 def previous_completed_volume(history: pd.DataFrame) -> int:
@@ -256,39 +362,13 @@ def previous_completed_volume(history: pd.DataFrame) -> int:
     return int(selected_volume)
 
 
-def safe_float_from_percent(value: object) -> float:
-    if pd.isna(value):
-        return 0.0
-
-    text = str(value)
-    text = text.replace(",", "")
-    match = re.search(r"-?\d+(?:\.\d+)?", text)
-    if not match:
-        return 0.0
-    return float(match.group(0))
-
-
-def safe_float(value: object) -> float:
-    if pd.isna(value):
-        return 0.0
-
-    text = str(value).replace(",", "")
-    match = re.search(r"-?\d+(?:\.\d+)?", text)
-    if not match:
-        return 0.0
-    return float(match.group(0))
-
-
 def enrich_with_volume_data(
     df: pd.DataFrame,
     min_sleep_seconds: float,
     max_sleep_seconds: float,
     limit: int | None,
 ) -> pd.DataFrame:
-    security_column = find_column(df, ["security", "ticker", "symbol"])
     enriched = df.copy() if limit is None else df.iloc[:limit].copy()
-
-    enriched["Ticker"] = ""
     enriched["Yesterday Volume"] = 0
     enriched["3M Average Volume"] = 0
     enriched["RVOL"] = 0.0
@@ -298,16 +378,14 @@ def enrich_with_volume_data(
     log(f"Preparing to enrich {len(rows_to_process)} ticker rows via yfinance.")
 
     for row_number, row_index in enumerate(rows_to_process, start=1):
-        security_value = enriched.at[row_index, security_column]
-        ticker_symbol = extract_ticker(security_value)
-        enriched.at[row_index, "Ticker"] = ticker_symbol
+        ticker_symbol = str(enriched.at[row_index, "Ticker"]).strip().upper()
+        log(f"Row {row_number}/{len(rows_to_process)}: processing ticker {ticker_symbol}")
 
         if not ticker_symbol:
-            log(f"Row {row_number}: no ticker could be extracted from Security={security_value!r}; skipping.")
+            log(f"Row {row_number}: empty ticker; skipping.")
             enriched.at[row_index, "Volume Fetch Status"] = "skipped: no ticker"
             continue
 
-        log(f"Row {row_number}/{len(rows_to_process)}: processing ticker {ticker_symbol}")
         try:
             ticker = yf.Ticker(ticker_symbol)
             history = ticker.history(period="5d", interval="1d", auto_adjust=False)
@@ -327,7 +405,7 @@ def enrich_with_volume_data(
                 f"3M avg volume={average_volume:,}, RVOL={rvol:.2f}x"
             )
         except Exception as exc:
-            log(f"{ticker_symbol}: yfinance lookup failed; skipping row. Error: {exc}")
+            log(f"{ticker_symbol}: yfinance lookup failed; skipping ticker. Error: {exc}")
             enriched.at[row_index, "Volume Fetch Status"] = f"error: {exc}"
 
         sleep_seconds = random.uniform(min_sleep_seconds, max_sleep_seconds)
@@ -337,12 +415,7 @@ def enrich_with_volume_data(
     return enriched
 
 
-def score_row(
-    row: pd.Series,
-    short_float_column: str | None,
-    borrow_fee_column: str | None,
-    squeeze_score_column: str | None,
-) -> tuple[int, list[str]]:
+def score_row(row: pd.Series) -> tuple[int, list[str]]:
     volume_fetch_status = str(row.get("Volume Fetch Status", "ok")).strip().lower()
     if volume_fetch_status and volume_fetch_status != "ok":
         return 0, [f"Skipped: volume fetch {volume_fetch_status}"]
@@ -350,7 +423,7 @@ def score_row(
     score = 0
     reasons: list[str] = []
 
-    short_float = safe_float_from_percent(row.get(short_float_column, 0)) if short_float_column else 0.0
+    short_float = safe_float(row.get("Short Float", 0))
     if short_float > 40:
         score += 40
         reasons.append("Short Float > 40%")
@@ -358,13 +431,13 @@ def score_row(
         score += 20
         reasons.append("Short Float > 20%")
 
-    borrow_fee = safe_float_from_percent(row.get(borrow_fee_column, 0)) if borrow_fee_column else 0.0
-    if borrow_fee > 100:
-        score += 30
-        reasons.append("Borrow Fee > 100%")
-    elif borrow_fee > 30:
-        score += 15
-        reasons.append("Borrow Fee > 30%")
+    days_to_cover = safe_float(row.get("Days to Cover", 0))
+    if days_to_cover > 5:
+        score += 20
+        reasons.append("Days to Cover > 5")
+    elif days_to_cover > 3:
+        score += 10
+        reasons.append("Days to Cover > 3")
 
     rvol = safe_float(row.get("RVOL", 0))
     if rvol > 3.0:
@@ -374,31 +447,18 @@ def score_row(
         score += 15
         reasons.append("RVOL > 1.5x")
 
-    squeeze_score = safe_float(row.get(squeeze_score_column, 0)) if squeeze_score_column else 0.0
-    if squeeze_score > 90:
-        score += 10
-        reasons.append("Fintel Score > 90")
-
     return score, reasons
 
 
 def evaluate_short_squeeze_risk(df: pd.DataFrame) -> pd.DataFrame:
-    short_float_column = find_column(df, ["short float"], required=False)
-    borrow_fee_column = find_column(df, ["borrow fee", "fee rate"], required=False)
-    squeeze_score_column = find_column(df, ["squeeze score", "short squeeze score", "score"], required=False)
-
-    log(f"Short Float column: {short_float_column or 'not found'}")
-    log(f"Borrow Fee column: {borrow_fee_column or 'not found'}")
-    log(f"Fintel Short Squeeze Score column: {squeeze_score_column or 'not found'}")
-
     evaluated = df.copy()
     scores: list[int] = []
     reasons_list: list[str] = []
 
     for _, row in evaluated.iterrows():
-        ticker_symbol = row.get("Ticker") or extract_ticker(row.get("Security", ""))
-        log(f"Evaluating ticker {ticker_symbol or 'UNKNOWN'}")
-        score, reasons = score_row(row, short_float_column, borrow_fee_column, squeeze_score_column)
+        ticker_symbol = str(row.get("Ticker", "")).strip().upper() or "UNKNOWN"
+        log(f"Evaluating ticker {ticker_symbol}")
+        score, reasons = score_row(row)
         scores.append(score)
         reasons_list.append("; ".join(reasons))
 
@@ -438,6 +498,8 @@ def markdown_table(df: pd.DataFrame, columns: list[str]) -> str:
             value = row[column]
             if column in {"Yesterday Volume", "3M Average Volume"}:
                 rendered_row.append(format_int(value))
+            elif column in {"Short Float", "Days to Cover"}:
+                rendered_row.append(format_float(value))
             elif column == "RVOL":
                 rendered_row.append(f"{format_float(value)}x")
             else:
@@ -460,11 +522,9 @@ def markdown_table(df: pd.DataFrame, columns: list[str]) -> str:
 def print_high_alert_targets(high_alerts: pd.DataFrame) -> None:
     preferred_columns = [
         "Ticker",
-        "Security",
         "Agent Score",
-        "Short Float %",
-        "Borrow Fee Rate",
-        "Short Squeeze Score",
+        "Short Float",
+        "Days to Cover",
         "Yesterday Volume",
         "3M Average Volume",
         "RVOL",
@@ -476,13 +536,20 @@ def print_high_alert_targets(high_alerts: pd.DataFrame) -> None:
 
 def parse_args(argv: list[str]) -> MonitorConfig:
     parser = argparse.ArgumentParser(
-        description="Run the US Stock Short Squeeze Monitor AI Agent pipeline."
+        description="Run the Finviz-based US Stock Short Squeeze Monitor AI Agent."
     )
-    parser.add_argument("--url", default=DEFAULT_FINTEL_URL, help="Fintel URL to scrape.")
+    parser.add_argument(
+        "--url",
+        default=DEFAULT_FINVIZ_URL,
+        help=(
+            "Finviz screener URL to scrape. Default uses ownership view and "
+            "Short Float > 20%% filter."
+        ),
+    )
     parser.add_argument(
         "--local-html",
         default=DEFAULT_LOCAL_HTML,
-        help="Fallback local HTML file saved manually from the browser.",
+        help="Fallback local Finviz screener HTML file saved manually from the browser.",
     )
     parser.add_argument(
         "--min-sleep",
@@ -500,7 +567,13 @@ def parse_args(argv: list[str]) -> MonitorConfig:
         "--limit",
         type=int,
         default=None,
-        help="Optional maximum number of rows to enrich. Useful for smoke tests.",
+        help="Optional maximum number of ticker rows to enrich. Useful for smoke tests.",
+    )
+    parser.add_argument(
+        "--max-pages",
+        type=int,
+        default=1,
+        help="Maximum Finviz screener pages to request directly before evaluation.",
     )
     parser.add_argument(
         "--output-csv",
@@ -515,40 +588,42 @@ def parse_args(argv: list[str]) -> MonitorConfig:
         parser.error("--min-sleep cannot exceed --max-sleep.")
     if args.limit is not None and args.limit <= 0:
         parser.error("--limit must be a positive integer when provided.")
+    if args.max_pages <= 0:
+        parser.error("--max-pages must be a positive integer.")
 
     return MonitorConfig(
-        fintel_url=args.url,
+        finviz_url=args.url,
         local_html_path=Path(args.local_html),
         min_sleep_seconds=args.min_sleep,
         max_sleep_seconds=args.max_sleep,
         limit=args.limit,
         output_csv_path=Path(args.output_csv) if args.output_csv else None,
+        max_pages=args.max_pages,
     )
 
 
 def run_pipeline(config: MonitorConfig) -> pd.DataFrame:
-    log_phase("1. DATA SCRAPING AND PARSING (SCRAPE)")
-    html = fetch_fintel_html(config.fintel_url, config.local_html_path)
+    log_phase("1. DATA ACQUISITION VIA FINVIZ (SCRAPE)")
+    html_pages = fetch_finviz_html_pages(config.finviz_url, config.local_html_path, config.max_pages)
     try:
-        leaderboard_df = parse_leaderboard_table(html)
+        candidate_df = parse_finviz_candidates(html_pages, config.local_html_path)
     except Exception as exc:
-        log(f"Initial HTML parse failed: {exc}")
+        log(f"Initial Finviz parse failed: {exc}")
         log("Attempting to parse local fallback HTML in case direct HTTP returned a protected page.")
-        local_html = read_local_html(config.local_html_path)
-        leaderboard_df = parse_leaderboard_table(local_html)
+        candidate_df = parse_finviz_candidates([read_local_html(config.local_html_path)])
 
-    log(f"Parsed leaderboard shape: {leaderboard_df.shape[0]} rows x {leaderboard_df.shape[1]} columns.")
-    log(f"Parsed columns: {list(leaderboard_df.columns)}")
+    log(f"Parsed Finviz candidate shape: {candidate_df.shape[0]} rows x {candidate_df.shape[1]} columns.")
+    log(f"Parsed columns: {list(candidate_df.columns)}")
 
-    log_phase("2. DYNAMIC VOLUME INJECTION (GET VOLUME)")
+    log_phase("2. DYNAMIC VOLUME AND METRIC INJECTION (GET VOLUME)")
     enriched_df = enrich_with_volume_data(
-        leaderboard_df,
+        candidate_df,
         config.min_sleep_seconds,
         config.max_sleep_seconds,
         config.limit,
     )
 
-    log_phase("3. MULTI-FACTOR QUANT EVALUATION (EVALUATE)")
+    log_phase("3. RISK EVALUATION ENGINE (EVALUATE)")
     high_alerts = evaluate_short_squeeze_risk(enriched_df)
     print_high_alert_targets(high_alerts)
 

@@ -1,22 +1,24 @@
 # US Stock Short Squeeze Monitor AI Agent
 
 Production-oriented Python pipeline for monitoring potential US stock short squeeze
-targets from a Fintel leaderboard export.
+targets from a Finviz screener export.
 
 ## What it does
 
 The agent runs three sequential phases:
 
-1. **Scrape** - Attempts to fetch `https://fintel.io` with browser-like headers. If
-   Fintel/Cloudflare blocks the request or returns unusable HTML, it falls back to
-   parsing a local `fintel.html` file saved manually from your browser.
-2. **Get Volume** - Extracts each ticker from the `Security` column, queries
+1. **Scrape** - Attempts to fetch a Finviz Ownership screener URL with
+   browser-like headers. The default URL filters for `Short Float > 20%`. If
+   Finviz blocks the request or returns unusable HTML, it falls back to parsing a
+   local `finviz.html` file saved manually from your browser.
+2. **Get Volume** - Extracts each ticker from the Finviz screener table, queries
    `yfinance`, and appends:
    - Yesterday / previous completed trading-day volume
    - 3-month average volume
    - Relative volume (`RVOL`)
-3. **Evaluate** - Scores each ticker with weighted short-squeeze rules and prints
-   high-alert targets with `Agent Score >= 50` as a Markdown table.
+3. **Evaluate** - Scores each ticker with weighted short-float, days-to-cover,
+   and RVOL rules, then prints high-alert targets with `Agent Score >= 50` as a
+   Markdown table.
 
 ## Install
 
@@ -26,12 +28,14 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-## Fintel fallback setup
+## Finviz fallback setup
 
-Fintel often uses Cloudflare protection. If the direct scrape fails:
+Finviz may block automated scraping. If the direct scrape fails:
 
-1. Open the Fintel leaderboard page in your browser.
-2. Save the raw HTML source as `fintel.html` in this repository directory.
+1. Open the Finviz screener page in your browser. Use the Ownership view
+   (`v=131`) and a short-float filter such as:
+   `https://finviz.com/screener.ashx?v=131&f=sh_short_o20&ft=4`
+2. Save the raw HTML source as `finviz.html` in this repository directory.
 3. Re-run the script.
 
 ## Run
@@ -44,8 +48,9 @@ Optional arguments:
 
 ```bash
 python short_squeeze_monitor.py \
-  --url "https://fintel.io" \
-  --local-html fintel.html \
+  --url "https://finviz.com/screener.ashx?v=131&f=sh_short_o20&ft=4" \
+  --local-html finviz.html \
+  --max-pages 1 \
   --output-csv high_alerts.csv
 ```
 
