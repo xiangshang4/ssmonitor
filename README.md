@@ -25,7 +25,7 @@ pip install -r requirements.txt
 Direct dependency install:
 
 ```bash
-pip install pandas beautifulsoup4 lxml requests
+pip install pandas beautifulsoup4 lxml requests openpyxl
 ```
 
 ## Run
@@ -40,6 +40,23 @@ If no ticker is supplied, the script defaults to `CAR`:
 
 ```bash
 python short_squeeze_monitor.py
+```
+
+Evaluate every ticker in the Excel workbook and output only companies with
+score higher than 60:
+
+```bash
+python run_excel_short_squeeze.py
+```
+
+Useful options:
+
+```bash
+python run_excel_short_squeeze.py \
+  --workbook "mid cap.xlsx" \
+  --min-score 60 \
+  --delay 1 \
+  --output-csv short_squeeze_score_gt60.csv
 ```
 
 ## Local fallback setup
