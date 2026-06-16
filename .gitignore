@@ -1,0 +1,8 @@
+# Batch run outputs
+short_squeeze_score_gt60.csv
+short_squeeze_all_scores.csv
+short_squeeze_errors.csv
+batch_run.log
+
+# Python
+__pycache__/
