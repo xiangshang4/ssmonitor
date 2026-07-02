@@ -156,18 +156,19 @@ def normalize_key(key: str) -> str:
 
 def parse_snapshot_with_beautifulsoup(html: str) -> dict[str, str]:
     soup = BeautifulSoup(html, "html.parser")
-    table = soup.find("table", class_=lambda value: value and "snapshot-table2" in value)
-    if table is None:
+    tables = soup.find_all("table", class_=lambda value: value and "snapshot-table2" in value)
+    if not tables:
         return {}
 
     snapshot: dict[str, str] = {}
-    for row in table.find_all("tr"):
-        cells = [clean_text(cell.get_text(" ", strip=True)) for cell in row.find_all("td")]
-        for index in range(0, len(cells) - 1, 2):
-            key = cells[index]
-            value = cells[index + 1]
-            if key:
-                snapshot[key] = value
+    for table in tables:
+        for row in table.find_all("tr"):
+            cells = [clean_text(cell.get_text(" ", strip=True)) for cell in row.find_all("td")]
+            for index in range(0, len(cells) - 1, 2):
+                key = cells[index]
+                value = cells[index + 1]
+                if key:
+                    snapshot[key] = value
     return snapshot
 
 
